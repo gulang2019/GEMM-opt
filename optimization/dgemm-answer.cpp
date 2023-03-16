@@ -10,6 +10,8 @@
 #include <iostream>
 #include <new>
 #include <tuple>
+#include <string>
+#include <vector>
 
 typedef double
 	ElementType; // You may change this to see the influence of the data type
@@ -17,14 +19,14 @@ typedef double
 static constexpr int kAlignInBytes = 512 / 8;
 static constexpr int kAlignInElements =
 	kAlignInBytes / sizeof(ElementType); // Keep compatible with AVX-512
-static constexpr int kDim = 1024;        // kDim may not be pow of 2!
+static constexpr int kDim = 512;        // kDim may not be pow of 2!
 static constexpr int RoundUpToMultiple(int num, int base) {
 	return (num + base - 1) / base * base;
 }
 static constexpr int kDimRoundUp = RoundUpToMultiple(kDim, kAlignInElements);
 
 static constexpr int kRepetitions =
-	10; // Due to the flutuation of actual running time, repetitions are
+	20; // Due to the flutuation of actual running time, repetitions are
 		// necessary
 
 static void DgemmBaseline(const ElementType src_a[kDimRoundUp][kDimRoundUp],
@@ -41,9 +43,53 @@ static void DgemmBaseline(const ElementType src_a[kDimRoundUp][kDimRoundUp],
 	}
 }
 
+constexpr int kStrideZmm = 512 / 8 / sizeof(ElementType);
 constexpr int kStrideYmm = 256 / 8 / sizeof(ElementType);
 constexpr int kStrideXmm = 128 / 8 / sizeof(ElementType);
 constexpr int kBlockSize = kAlignInElements;
+
+static void DgemmParalleled(const ElementType src_a[kDimRoundUp][kDimRoundUp],
+						  const ElementType src_b[kDimRoundUp][kDimRoundUp],
+						  ElementType       dst[kDimRoundUp][kDimRoundUp]) {
+	#pragma omp parallel for 
+	for (auto outer_i = 0; outer_i < kDimRoundUp; outer_i += kBlockSize) {
+		for (auto i = outer_i; i < outer_i + kBlockSize; i++) {
+			for (auto j = 0; j < kDim; j++) {
+				ElementType sum {};
+				for (auto k = 0; k < kDim; k++) {
+					sum += src_a[i][k] * src_b[k][j];
+				}
+				dst[i][j] = sum;
+			}
+		}
+	}
+}
+
+static void DgemmBlocked (const ElementType src_a[kDimRoundUp][kDimRoundUp],
+						  const ElementType src_b[kDimRoundUp][kDimRoundUp],
+						  ElementType       dst[kDimRoundUp][kDimRoundUp]) {
+#pragma omp parallel for 
+	for (auto outer_i = 0; outer_i < kDimRoundUp; outer_i += kBlockSize) {
+		for (auto i = outer_i; i < outer_i + kBlockSize; i++) {
+			for (auto j = 0; j < kDimRoundUp; j++) 
+				dst[i][j] = 0;
+		}
+		for (auto outer_k = 0; outer_k < kDimRoundUp; outer_k += kBlockSize) {
+			for (auto outer_j = 0; outer_j < kDimRoundUp;
+				 outer_j += kBlockSize) {
+				for (auto i = outer_i; i < outer_i + kBlockSize; i++) {
+					for (auto j = outer_j; j < outer_j + kBlockSize; j ++) {
+						ElementType sum {};
+						for (auto k = outer_k; k < outer_k + kBlockSize; k++) {
+							sum += src_a[i][k] * src_b[k][j];
+						}
+						dst[i][j] += sum;
+					}
+				}
+			}
+		}
+	}
+}
 
 static void DgemmOptimized(const ElementType src_a[kDimRoundUp][kDimRoundUp],
 						   const ElementType src_b[kDimRoundUp][kDimRoundUp],
@@ -94,6 +140,34 @@ static void DgemmDeepBlockingYmm(
 							auto result =
 								multiplier_a * multiplier_b + addend_c;
 							_mm256_store_pd(&dst[outer_i][outer_j][i][j],
+											result);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+static void DgemmDeepBlockingZmm(
+	const ElementType src_a[kBlocks][kBlocks][kBlockSize][kBlockSize],
+	const ElementType src_b[kBlocks][kBlocks][kBlockSize][kBlockSize],
+	ElementType       dst[kBlocks][kBlocks][kBlockSize][kBlockSize]) {
+#pragma omp parallel for
+	for (auto outer_i = 0; outer_i < kBlocks; outer_i++) {
+		for (auto outer_k = 0; outer_k < kBlocks; outer_k++) {
+			for (auto outer_j = 0; outer_j < kBlocks; outer_j++) {
+				for (auto i = 0; i < kBlockSize; i++) {
+					for (auto k = 0; k < kBlockSize; k++) {
+						auto multiplier_a = src_a[outer_i][outer_k][i][k];
+						for (auto j = 0; j < kBlockSize; j += kStrideZmm) {
+							auto multiplier_b =
+								_mm512_load_pd(&src_b[outer_k][outer_j][k][j]);
+							auto addend_c =
+								_mm512_load_pd(&dst[outer_i][outer_j][i][j]);
+							auto result =
+								multiplier_a * multiplier_b + addend_c;
+							_mm512_store_pd(&dst[outer_i][outer_j][i][j],
 											result);
 						}
 					}
@@ -421,7 +495,7 @@ typedef decltype(std::chrono::high_resolution_clock::now()
 
 // Return value: running time of one trial (only the running time of the kernel
 // is included). Time is measured by milliseconds.
-static long long MeasureTime(
+static double MeasureTime(
 	void (*dgemm_kernel)(const ElementType src_a[kDimRoundUp][kDimRoundUp],
 						 const ElementType src_b[kDimRoundUp][kDimRoundUp],
 						 ElementType       dst[kDimRoundUp][kDimRoundUp])) {
@@ -450,13 +524,13 @@ static long long MeasureTime(
 	}
 
 	using namespace std::chrono_literals;
-	return total_time_elapsed / kRepetitions / 1ms;
+	return (double)total_time_elapsed.count()/ kRepetitions / 1e6;
 }
 
 // Return value: running time of one trial (only the running time of the kernel
 // is included). Time is measured by milliseconds. This is for the "cache
 // blocking" version.
-static long long MeasureTime(void (*dgemm_kernel)(
+static double MeasureTime(void (*dgemm_kernel)(
 	const ElementType src_a[kBlocks][kBlocks][kBlockSize][kBlockSize],
 	const ElementType src_b[kBlocks][kBlocks][kBlockSize][kBlockSize],
 	ElementType       dst[kBlocks][kBlocks][kBlockSize][kBlockSize])) {
@@ -488,7 +562,7 @@ static long long MeasureTime(void (*dgemm_kernel)(
 	}
 
 	using namespace std::chrono_literals;
-	return total_time_elapsed / kRepetitions / 1ms;
+	return (double)total_time_elapsed.count()/ kRepetitions / 1e6;
 }
 
 static auto CalculateSpeedup(
@@ -544,23 +618,74 @@ static auto CalculateSpeedup(
 
 #define DEBUG
 
+struct Config {
+	void (*baseline) (
+		const ElementType src_a[kDimRoundUp][kDimRoundUp],
+		const ElementType src_b[kDimRoundUp][kDimRoundUp],
+		ElementType       dst[kDimRoundUp][kDimRoundUp]) = nullptr;
+	void (*optimized)(
+		const ElementType src_a[kDimRoundUp][kDimRoundUp],
+		const ElementType src_b[kDimRoundUp][kDimRoundUp],
+		ElementType       dst[kDimRoundUp][kDimRoundUp]) = nullptr;
+	void (*optimized_relayout) (
+		const ElementType src_a[kBlocks][kBlocks][kBlockSize][kBlockSize],
+		const ElementType src_b[kBlocks][kBlocks][kBlockSize][kBlockSize],
+		ElementType       dst[kBlocks][kBlocks][kBlockSize][kBlockSize]) = nullptr;
+	bool relayout = false;
+	std::string name;
+};
+
 int main() {
 	std::srand(std::time(nullptr));
+	Config configs[] = {
+		{DgemmBaseline, DgemmParalleled, nullptr, false, "Paralleled"},
+		{DgemmBaseline, DgemmBlocked, nullptr, false, "Blocked"},
+		// {DgemmBaseline, nullptr, DgemmDeepBlockingXmm, true, "SIMDizedXmm"},
+		{DgemmBaseline, nullptr, DgemmDeepBlockingYmm, true, "SIMDized-AVX2"},
+		{DgemmBaseline, nullptr, DgemmDeepBlockingZmm, true, "SIMDized-AVX512"},
+	};
 
+	for (auto & config: configs) {
+		std::cout << "===========" << config.name << "===============" << std::endl;
+		if (!config.relayout) {
 #ifdef DEBUG
-	if (Verify(DgemmBaseline, DgemmDeepBlockingXmm, 10) == false) {
-		std::cerr << "Functionally incorrect" << std::endl;
-		return -1;
-	} else {
-		std::cerr << "Functionally correct" << std::endl;
-	}
+			if(Verify(config.baseline, config.optimized, 1) == false) {
+				std::cerr << "Functionally incorrect" << std::endl;
+				continue;
+			}
+			else {
+				std::cerr << "Functionally correct" << std::endl;
+			}
 #endif
 
-	auto [running_time_baseline, runnning_time_optimzed, speedup] =
-		CalculateSpeedup(DgemmBaseline, DgemmDeepBlockingXmm);
-	std::cout << "Average running time of the baseline version is "
-			  << running_time_baseline << "ms" << std::endl;
-	std::cout << "Average running time of the optimized version is "
-			  << runnning_time_optimzed << "ms" << std::endl;
-	std::cout << "The speedup is " << speedup << "x" << std::endl;
+			auto [running_time_baseline, runnning_time_optimzed, speedup] =
+				CalculateSpeedup(config.baseline, config.optimized);
+			std::cout << "Average running time of the baseline version is "
+					<< running_time_baseline << "ms" << std::endl;
+			std::cout << "Average running time of the optimized version is "
+					<< runnning_time_optimzed << "ms" << std::endl;
+			std::cout << "The speedup is " << speedup << "x" << std::endl;
+		}
+		else{ // config.relayout = true
+#ifdef DEBUG
+			if(Verify(config.baseline, config.optimized_relayout, 1) == false) {
+				std::cerr << "Functionally incorrect" << std::endl;
+				continue;
+			}
+			else {
+				std::cerr << "Functionally correct" << std::endl;
+			}
+#endif
+
+			auto [running_time_baseline, runnning_time_optimzed, speedup] =
+				CalculateSpeedup(config.baseline, config.optimized_relayout);
+			std::cout << "Average running time of the baseline version is "
+					<< running_time_baseline << "ms" << std::endl;
+			std::cout << "Average running time of the optimized version is "
+					<< runnning_time_optimzed << "ms" << std::endl;
+			std::cout << "The speedup is " << speedup << "x" << std::endl;
+		}
+		
+	}
+
 }

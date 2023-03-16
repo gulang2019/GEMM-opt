@@ -1,5 +1,13 @@
 # Optimization Techniques for DGEMM
 The following techniques are applicable to many problems.
+
+
+## Compilelation 
+```bash 
+g++ ./dgemm-answer.cpp -o dgemm -march=native -fopenmp -O2 -std=c++17
+./dgemm
+```
+
 ## ILP
 ### Compiler Optimization Flags
 - Ofast
