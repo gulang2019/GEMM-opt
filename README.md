@@ -15,3 +15,8 @@ git clone git@github.com:gulang2019/GEMM-opt.git
 3. Implement your optimization in dgemm/dgemm.cpp
 
 4. Look at / Run the sample project in optimization/, see `optimization/dgemm-solution-guide.md` for more information.
+
+FAQ:
+
+- After I login to the server, the g++ version is too low to support -std=c++17.
+	Run `module load gcc`. 

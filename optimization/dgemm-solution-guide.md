@@ -5,8 +5,15 @@ The following techniques are applicable to many problems.
 ## Compilelation 
 ```bash 
 g++ ./dgemm-answer.cpp -o dgemm -march=native -fopenmp -O2 -std=c++17
-./dgemm
 ```
+
+Run the program. 
+```bash
+./dgemm 
+```
+> If you are on a server that uses time-sharing system (e.g. wmjx2), you need to provide a `.slurm` file to describe your execution.
+An example is written in `run.slurm`. Upon running, use `sbatch ./run.slurm` and check result in ./slurm-[number].out. 
+
 
 ## ILP
 ### Compiler Optimization Flags
