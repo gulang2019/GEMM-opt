@@ -43,7 +43,6 @@ static void DgemmBaseline(const ElementType src_a[kDimRoundUp][kDimRoundUp],
 	}
 }
 
-constexpr int kStrideZmm = 512 / 8 / sizeof(ElementType);
 constexpr int kStrideYmm = 256 / 8 / sizeof(ElementType);
 constexpr int kStrideXmm = 128 / 8 / sizeof(ElementType);
 constexpr int kBlockSize = kAlignInElements;
@@ -140,34 +139,6 @@ static void DgemmDeepBlockingYmm(
 							auto result =
 								multiplier_a * multiplier_b + addend_c;
 							_mm256_store_pd(&dst[outer_i][outer_j][i][j],
-											result);
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-static void DgemmDeepBlockingZmm(
-	const ElementType src_a[kBlocks][kBlocks][kBlockSize][kBlockSize],
-	const ElementType src_b[kBlocks][kBlocks][kBlockSize][kBlockSize],
-	ElementType       dst[kBlocks][kBlocks][kBlockSize][kBlockSize]) {
-#pragma omp parallel for
-	for (auto outer_i = 0; outer_i < kBlocks; outer_i++) {
-		for (auto outer_k = 0; outer_k < kBlocks; outer_k++) {
-			for (auto outer_j = 0; outer_j < kBlocks; outer_j++) {
-				for (auto i = 0; i < kBlockSize; i++) {
-					for (auto k = 0; k < kBlockSize; k++) {
-						auto multiplier_a = src_a[outer_i][outer_k][i][k];
-						for (auto j = 0; j < kBlockSize; j += kStrideZmm) {
-							auto multiplier_b =
-								_mm512_load_pd(&src_b[outer_k][outer_j][k][j]);
-							auto addend_c =
-								_mm512_load_pd(&dst[outer_i][outer_j][i][j]);
-							auto result =
-								multiplier_a * multiplier_b + addend_c;
-							_mm512_store_pd(&dst[outer_i][outer_j][i][j],
 											result);
 						}
 					}
@@ -642,7 +613,6 @@ int main() {
 		{DgemmBaseline, DgemmBlocked, nullptr, false, "Blocked"},
 		// {DgemmBaseline, nullptr, DgemmDeepBlockingXmm, true, "SIMDizedXmm"},
 		{DgemmBaseline, nullptr, DgemmDeepBlockingYmm, true, "SIMDized-AVX2"},
-		{DgemmBaseline, nullptr, DgemmDeepBlockingZmm, true, "SIMDized-AVX512"},
 	};
 
 	for (auto & config: configs) {
